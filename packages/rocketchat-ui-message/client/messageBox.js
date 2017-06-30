@@ -161,10 +161,12 @@ Template.messageBox.helpers({
 		}
 	},
 	showMic() {
-		return Template.instance().showMicButton.get();
+		//return Template.instance().showMicButton.get();
+		return false;
 	},
 	showVRec() {
-		return Template.instance().showVideoRec.get();
+		//return Template.instance().showVideoRec.get();
+		return false;
 	},
 	showSend() {
 		if (!Template.instance().isMessageFieldEmpty.get()) {
