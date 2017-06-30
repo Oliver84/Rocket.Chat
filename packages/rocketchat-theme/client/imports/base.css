@@ -4660,6 +4660,10 @@ body:not(.is-cordova) {
 	.sweet-alert {
 		margin-left: 0 !important;
 	}
+
+	.main-content-flex {
+		width: 110%;
+	}
 }
 
 .one-passsword {

@@ -52,4 +52,22 @@ this.menu = new class {
 	toggle() {
 		return this.isOpen() ? this.close() : this.open();
 	}
+
+	isOpenTab() {
+		return Session.get('isTabOpen');
+	}
+
+	openTab() {
+		Session.set('isTabOpen', true);
+		this.mainContent && this.mainContent.css('transform', `translateX(${ isRtl(localStorage.getItem('userLanguage'))?'-':'' }-40px)`);
+	}
+
+	closeTab() {
+		Session.set('isTabOpen', false);
+		this.mainContent && this.mainContent .css('transform', 'translateX(0)');
+	}
+
+	toggleTab() {
+		return this.isOpen() ? this.close() : this.open();
+	}
 };

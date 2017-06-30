@@ -203,8 +203,8 @@ Template.main.events({
 					if (t.diff < -260) {
 						t.diff = -260;
 					}
-					if (t.diff > 0) {
-						t.diff = 0;
+					if (t.diff > -40) {
+						t.diff = -40;
 					}
 				} else {
 					if (menu.isOpen()) {
@@ -215,8 +215,8 @@ Template.main.events({
 					if (t.diff > 260) {
 						t.diff = 260;
 					}
-					if (t.diff < 0) {
-						t.diff = 0;
+					if (t.diff < -40) {
+						t.diff = -40;
 					}
 				}
 				t.mainContent.addClass('notransition');
@@ -249,8 +249,10 @@ Template.main.events({
 				}
 			} else if (t.diff >= 60) {
 				return menu.open();
-			} else {
+			} else if (t.diff < 60 && t.diff > 0) {
 				return menu.close();
+			} else if (t.diff < 0) {
+				return menu.openTab();
 			}
 		}
 	}
