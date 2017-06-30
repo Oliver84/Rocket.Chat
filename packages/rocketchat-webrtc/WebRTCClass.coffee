@@ -103,11 +103,7 @@ class WebRTCTransportClass
 
 class WebRTCClass
 	config:
-		iceServers: [
-			{urls: "stun:stun.l.google.com:19302"}
-			{urls: "stun:23.21.150.121"}
-			{urls: "turn:numb.viagenie.ca:3478", username: "team@rocket.chat", credential: "demo"}
-		]
+		iceServers: []
 
 	debug: false
 
@@ -119,6 +115,24 @@ class WebRTCClass
 		@param room {String}
 	###
 	constructor: (@selfId, @room) ->
+		@config.iceServers = []
+
+		servers = RocketChat.settings.get("WebRTC_Servers")
+		if servers?.trim() isnt ''
+			servers = servers.replace /\s/g, ''
+			servers = servers.split ','
+			for server in servers
+				server = server.split '@'
+				serverConfig =
+					urls: server.pop()
+
+				if server.length is 1
+					server = server[0].split ':'
+					serverConfig.username = decodeURIComponent(server[0])
+					serverConfig.credential = decodeURIComponent(server[1])
+
+				@config.iceServers.push serverConfig
+
 		@peerConnections = {}
 
 		@remoteItems = new ReactiveVar []
@@ -136,17 +150,20 @@ class WebRTCClass
 		@autoAccept = false
 
 		@navigator = undefined
-		if navigator.userAgent.toLocaleLowerCase().indexOf('chrome') > -1
+		userAgent = navigator.userAgent.toLocaleLowerCase();
+		if userAgent.indexOf('electron') isnt -1
+			@navigator = 'electron'
+		else if userAgent.indexOf('chrome') isnt -1
 			@navigator = 'chrome'
-		else if navigator.userAgent.toLocaleLowerCase().indexOf('firefox') > -1
+		else if userAgent.indexOf('firefox') isnt -1
 			@navigator = 'firefox'
-		else if navigator.userAgent.toLocaleLowerCase().indexOf('safari') > -1
+		else if userAgent.indexOf('safari') isnt -1
 			@navigator = 'safari'
 
-		@screenShareAvailable = @navigator in ['chrome', 'firefox']
+		@screenShareAvailable = @navigator in ['chrome', 'firefox', 'electron']
 
 		@media =
-			video: true
+			video: false
 			audio: true
 
 		@transport = new @transportClass @
@@ -159,7 +176,7 @@ class WebRTCClass
 
 		Meteor.setInterval @checkPeerConnections.bind(@), 1000
 
-		Meteor.setInterval @broadcastStatus.bind(@), 1000
+		# Meteor.setInterval @broadcastStatus.bind(@), 1000
 
 	log: ->
 		if @debug is true
@@ -214,10 +231,10 @@ class WebRTCClass
 		if @active isnt true or @monitor is true or @remoteMonitoring is true then return
 
 		remoteConnections = []
-		for id, peerConnections of @peerConnections
+		for id, peerConnection of @peerConnections
 			remoteConnections.push
 				id: id
-				media: peerConnections.remoteMedia
+				media: peerConnection.remoteMedia
 
 		@transport.sendStatus
 			media: @media
@@ -310,9 +327,32 @@ class WebRTCClass
 
 		return peerConnection
 
+	_getUserMedia: (media, onSuccess, onError) ->
+		onSuccessLocal = (stream) ->
+			if AudioContext? and stream.getAudioTracks().length > 0
+				audioContext = new AudioContext
+				source = audioContext.createMediaStreamSource(stream)
+
+				volume = audioContext.createGain()
+				source.connect(volume)
+				peer = audioContext.createMediaStreamDestination()
+				volume.connect(peer)
+				volume.gain.value = 0.6
+
+				stream.removeTrack(stream.getAudioTracks()[0])
+				stream.addTrack(peer.stream.getAudioTracks()[0])
+				stream.volume = volume
+
+				this.audioContext = audioContext
+
+			onSuccess(stream)
+
+		navigator.getUserMedia media, onSuccessLocal, onError
+
+
 	getUserMedia: (media, onSuccess, onError=@onError) ->
 		if media.desktop isnt true
-			navigator.getUserMedia media, onSuccess, onError
+			@_getUserMedia media, onSuccess, onError
 			return
 
 		if @screenShareAvailable isnt true
@@ -320,7 +360,7 @@ class WebRTCClass
 			return
 
 		getScreen = (audioStream) =>
-			if document.cookie.indexOf("rocketchatscreenshare=chrome") is -1 and not window.rocketchatscreenshare?
+			if document.cookie.indexOf("rocketchatscreenshare=chrome") is -1 and not window.rocketchatscreenshare? and @navigator isnt 'electron'
 				refresh = ->
 					swal
 						type: "warning"
@@ -337,8 +377,13 @@ class WebRTCClass
 				, (isConfirm) =>
 					if isConfirm
 						if @navigator is 'chrome'
-							chrome.webstore.install undefined, refresh, ->
-								window.open('https://chrome.google.com/webstore/detail/rocketchat-screen-share/nocfbnnmjnndkbipkabodnheejiegccf')
+							url = 'https://chrome.google.com/webstore/detail/rocketchat-screen-share/nocfbnnmjnndkbipkabodnheejiegccf'
+							try
+								chrome.webstore.install url, refresh, ->
+									window.open(url)
+									refresh()
+							catch e
+								window.open(url)
 								refresh()
 						else if @navigator is 'firefox'
 							window.open('https://addons.mozilla.org/en-GB/firefox/addon/rocketchat-screen-share/')
@@ -357,10 +402,9 @@ class WebRTCClass
 					video:
 						mozMediaSource: 'window'
 						mediaSource: 'window'
-				navigator.getUserMedia media, getScreenSuccess, onError
+				@_getUserMedia media, getScreenSuccess, onError
 			else
-				ChromeScreenShare.getSourceId (id) =>
-					console.log id
+				ChromeScreenShare.getSourceId @navigator, (id) =>
 					media =
 						audio: false
 						video:
@@ -370,7 +414,7 @@ class WebRTCClass
 								maxWidth: 1280
 								maxHeight: 720
 
-					navigator.getUserMedia media, getScreenSuccess, onError
+					@_getUserMedia media, getScreenSuccess, onError
 
 		if @navigator is 'firefox' or not media.audio? or media.audio is false
 			getScreen()
@@ -381,7 +425,7 @@ class WebRTCClass
 			getAudioError = =>
 				getScreen()
 
-			navigator.getUserMedia {audio: media.audio}, getAudioSuccess, getAudioError
+			@_getUserMedia {audio: media.audio}, getAudioSuccess, getAudioError
 
 
 	###
@@ -426,7 +470,8 @@ class WebRTCClass
 
 	stopAllPeerConnections: ->
 		for id, peerConnection of @peerConnections
-				@stopPeerConnection id
+			@stopPeerConnection id
+		window.audioContext?.close()
 
 	setAudioEnabled: (enabled=true) ->
 		if @localStream?
@@ -557,7 +602,7 @@ class WebRTCClass
 				title = "Group audio call from #{subscription.name}"
 
 		swal
-			title: "<i class='icon-#{icon} alert-icon'></i>#{title}"
+			title: "<i class='icon-#{icon} alert-icon success-color'></i>#{title}"
 			text: "Do you want to accept?"
 			html: true
 			showCancelButton: true
@@ -768,9 +813,11 @@ WebRTC = new class
 
 
 Meteor.startup ->
-	RocketChat.Notifications.onUser 'webrtc', (type, data) =>
-		if not data.room? then return
+	Tracker.autorun ->
+		if Meteor.userId()
+			RocketChat.Notifications.onUser 'webrtc', (type, data) =>
+				if not data.room? then return
 
-		webrtc = WebRTC.getInstanceByRoomId(data.room)
+				webrtc = WebRTC.getInstanceByRoomId(data.room)
 
-		webrtc.transport.onUserStream type, data
+				webrtc.transport.onUserStream type, data

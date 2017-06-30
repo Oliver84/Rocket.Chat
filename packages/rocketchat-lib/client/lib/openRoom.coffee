@@ -5,26 +5,40 @@ currentTracker = undefined
 
 	Meteor.defer ->
 		currentTracker = Tracker.autorun (c) ->
+			user = Meteor.user()
+			if (user? and not user.username?) or (not user? and RocketChat.settings.get('Accounts_AllowAnonymousRead') is false)
+				BlazeLayout.render 'main'
+				return
+
 			if RoomManager.open(type + name).ready() isnt true
-				BlazeLayout.render 'main', {center: 'loading'}
+				BlazeLayout.render 'main', { modal: RocketChat.Layout.isEmbedded(), center: 'loading' }
 				return
 
 			currentTracker = undefined
 			c.stop()
 
-			query =
-				t: type
-				name: name
-
-			if type is 'd'
-				delete query.name
-				query.usernames =
-					$all: [name, Meteor.user()?.username]
-
-			room = ChatRoom.findOne(query)
+			room = RocketChat.roomTypes.findRoom(type, name, user)
 			if not room?
-				Session.set 'roomNotFound', {type: type, name: name}
-				BlazeLayout.render 'main', {center: 'roomNotFound'}
+				if type is 'd'
+					Meteor.call 'createDirectMessage', name, (err) ->
+						if !err
+							RoomManager.close(type + name)
+							openRoom('d', name)
+						else
+							Session.set 'roomNotFound', {type: type, name: name}
+							BlazeLayout.render 'main', {center: 'roomNotFound'}
+							return
+				else
+					Meteor.call 'getRoomByTypeAndName', type, name, (err, record) ->
+						if err?
+							Session.set 'roomNotFound', {type: type, name: name}
+							BlazeLayout.render 'main', {center: 'roomNotFound'}
+						else
+							delete record.$loki
+							RocketChat.models.Rooms.upsert({ _id: record._id }, _.omit(record, '_id'))
+							RoomManager.close(type + name)
+							openRoom(type, name)
+
 				return
 
 			mainNode = document.querySelector('.main-content')
@@ -38,6 +52,8 @@ currentTracker = undefined
 
 			Session.set 'openedRoom', room._id
 
+			fireGlobalEvent 'room-opened', _.omit room, 'usernames'
+
 			Session.set 'editRoomTitle', false
 			RoomManager.updateMentionsMarksOfRoom type + name
 			Meteor.setTimeout ->
@@ -45,21 +61,20 @@ currentTracker = undefined
 			, 2000
 			# KonchatNotification.removeRoomNotification(params._id)
 
-			if Meteor.Device.isDesktop()
+			if Meteor.Device.isDesktop() and window.chatMessages?[room._id]?
 				setTimeout ->
 					$('.message-form .input-message').focus()
 				, 100
 
-			RocketChat.TabBar.resetButtons()
-			RocketChat.TabBar.addButton({ id: 'message-search', i18nTitle: t('Search'), icon: 'octicon octicon-search', template: 'messageSearch', order: 1 })
-			if type is 'd'
-				RocketChat.TabBar.addButton({ id: 'members-list', i18nTitle: t('User_Info'), icon: 'octicon octicon-person', template: 'membersList', order: 2 })
-			else
-				RocketChat.TabBar.addButton({ id: 'members-list', i18nTitle: t('Members_List'), icon: 'octicon octicon-organization', template: 'membersList', order: 2 })
-			RocketChat.TabBar.addButton({ id: 'uploaded-files-list', i18nTitle: t('Room_uploaded_file_list'), icon: 'octicon octicon-file-symlink-directory', template: 'uploadedFilesList', order: 3 })
-
 			# update user's room subscription
-			if ChatSubscription.findOne({rid: room._id})?.open is false
-				Meteor.call 'openRoom', room._id
+			sub = ChatSubscription.findOne({rid: room._id})
+			if sub?.open is false
+				Meteor.call 'openRoom', room._id, (err) ->
+					if err
+						return handleError(err)
 
-			RocketChat.callbacks.run 'enter-room', ChatSubscription.findOne({rid: room._id})
+			if FlowRouter.getQueryParam('msg')
+				msg = { _id: FlowRouter.getQueryParam('msg'), rid: room._id }
+				RoomHistoryManager.getSurroundingMessages(msg);
+
+			RocketChat.callbacks.run 'enter-room', sub

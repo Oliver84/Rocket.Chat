@@ -1,11 +1,19 @@
-RocketChat.models.Users = new class extends RocketChat.models._Base
+class ModelUsers extends RocketChat.models._Base
 	constructor: ->
-		@model = Meteor.users
+		super(arguments...)
 
+		@tryEnsureIndex { 'roles': 1 }, { sparse: 1 }
+		@tryEnsureIndex { 'name': 1 }
+		@tryEnsureIndex { 'lastLogin': 1 }
+		@tryEnsureIndex { 'status': 1 }
+		@tryEnsureIndex { 'active': 1 }, { sparse: 1 }
+		@tryEnsureIndex { 'statusConnection': 1 }, { sparse: 1 }
+		@tryEnsureIndex { 'type': 1 }
 
-	# FIND ONE
-	findOneById: (_id, options) ->
-		return @findOne _id, options
+		this.cache.ensureIndex('username', 'unique')
+
+	findOneByImportId: (_id, options) ->
+		return @findOne { importIds: _id }, options
 
 	findOneByUsername: (username, options) ->
 		query =
@@ -15,28 +23,7 @@ RocketChat.models.Users = new class extends RocketChat.models._Base
 
 	findOneByEmailAddress: (emailAddress, options) ->
 		query =
-			'emails.address': emailAddress
-
-		return @findOne query, options
-
-	findOneByVerifiedEmailAddress: (emailAddress, verified=true, options) ->
-		query =
-			emails:
-				$elemMatch:
-					address: emailAddress
-					verified: verified
-
-		return @findOne query, options
-
-	findOneVerifiedFromSameDomain: (email, options) ->
-		domain = s.strRight(email, '@')
-		query =
-			emails:
-				$elemMatch:
-					address:
-						$regex: new RegExp "@" + domain + "$", "i"
-						$ne: email
-					verified: true
+			'emails.address': new RegExp("^" + s.escapeRegExp(emailAddress) + "$", 'i')
 
 		return @findOne query, options
 
@@ -46,8 +33,21 @@ RocketChat.models.Users = new class extends RocketChat.models._Base
 
 		return @findOne query, options
 
+	findOneByIdAndLoginToken: (_id, token, options) ->
+		query =
+			_id: _id
+			'services.resume.loginTokens.hashedToken' : Accounts._hashLoginToken(token)
+
+		return @findOne query, options
+
 
 	# FIND
+	findById: (userId) ->
+		query =
+			_id: userId
+
+		return @find query
+
 	findUsersNotOffline: (options) ->
 		query =
 			username:
@@ -64,15 +64,74 @@ RocketChat.models.Users = new class extends RocketChat.models._Base
 
 		return @find query, options
 
-	findByActiveUsersNameOrUsername: (nameOrUsername, options) ->
-		query =
-			username:
-				$exists: 1
-			active: true
+	findUsersByUsernamesWithHighlights: (usernames, options) ->
+		if this.useCache
+			result =
+				fetch: () ->
+					return RocketChat.models.Users.getDynamicView('highlights').data().filter (record) ->
+						return usernames.indexOf(record.username) > -1
+				count: () ->
+					return result.fetch().length
+				forEach: (fn) ->
+					return result.fetch().forEach(fn)
+			return result
 
-			$or: [
-				{name: nameOrUsername}
-				{username: nameOrUsername}
+		query =
+			username: { $in: usernames }
+			'settings.preferences.highlights.0':
+				$exists: true
+
+		return @find query, options
+
+	findActiveByUsernameOrNameRegexWithExceptions: (searchTerm, exceptions = [], options = {}) ->
+		if not _.isArray exceptions
+			exceptions = [ exceptions ]
+
+		termRegex = new RegExp s.escapeRegExp(searchTerm), 'i'
+		query = {
+			$or: [{
+				username: termRegex
+			}, {
+				name: termRegex
+			}],
+			active: true,
+			type: {
+				$in: ['user', 'bot']
+			},
+			$and: [{
+				username: {
+					$exists: true
+				}
+			}, {
+				username: {
+					$nin: exceptions
+				}
+			}]
+		}
+
+		return @find query, options
+
+	findByActiveUsersExcept: (searchTerm, exceptions = [], options = {}) ->
+		if not _.isArray exceptions
+			exceptions = [ exceptions ]
+
+		termRegex = new RegExp s.escapeRegExp(searchTerm), 'i'
+		query =
+			$and: [
+				{
+					active: true
+					$or: [
+						{
+							username: termRegex
+						}
+						{
+							name: termRegex
+						}
+					]
+				}
+				{
+					username: { $exists: true, $nin: exceptions }
+				}
 			]
 
 		return @find query, options
@@ -87,6 +146,9 @@ RocketChat.models.Users = new class extends RocketChat.models._Base
 				{username: nameOrUsername}
 			]
 
+			type:
+				$in: ['user']
+
 		return @find query, options
 
 	findByUsernameNameOrEmailAddress: (usernameNameOrEmailAddress, options) ->
@@ -96,6 +158,20 @@ RocketChat.models.Users = new class extends RocketChat.models._Base
 				{username: usernameNameOrEmailAddress}
 				{'emails.address': usernameNameOrEmailAddress}
 			]
+			type:
+				$in: ['user', 'bot']
+
+		return @find query, options
+
+	findLDAPUsers: (options) ->
+		query =
+			ldap: true
+
+		return @find query, options
+
+	findCrowdUsers: (options) ->
+		query =
+			crowd: true
 
 		return @find query, options
 
@@ -106,7 +182,27 @@ RocketChat.models.Users = new class extends RocketChat.models._Base
 
 		return @find(query, options)?.fetch?()?[0]?.lastLogin
 
+	findUsersByUsernames: (usernames, options) ->
+		query =
+			username:
+				$in: usernames
+
+		return @find query, options
+
 	# UPDATE
+	addImportIds: (_id, importIds) ->
+		importIds = [].concat(importIds)
+
+		query =
+			_id: _id
+
+		update =
+			$addToSet:
+				importIds:
+					$each: importIds
+
+		return @update query, update
+
 	updateLastLoginById: (_id) ->
 		update =
 			$set:
@@ -129,10 +225,44 @@ RocketChat.models.Users = new class extends RocketChat.models._Base
 
 		return @update _id, update
 
+	setEmail: (_id, email) ->
+		update =
+			$set:
+				emails: [
+					address: email
+					verified: false
+				]
+
+		return @update _id, update
+
+	setEmailVerified: (_id, email) ->
+		query =
+			_id: _id
+			emails:
+				$elemMatch:
+					address: email
+					verified: false
+
+		update =
+			$set:
+				'emails.$.verified': true
+
+		return @update query, update
+
 	setName: (_id, name) ->
 		update =
 			$set:
 				name: name
+
+		return @update _id, update
+
+	setCustomFields: (_id, fields) ->
+		values = {}
+		for key, value of fields
+			values["customFields.#{key}"] = value
+
+		update =
+			$set: values
 
 		return @update _id, update
 
@@ -171,6 +301,24 @@ RocketChat.models.Users = new class extends RocketChat.models._Base
 
 		return @update _id, update
 
+	unsetRequirePasswordChange: (_id) ->
+		update =
+			$unset:
+				"requirePasswordChange" : true
+				"requirePasswordChangeReason" : true
+
+		return @update _id, update
+
+	resetPasswordAndSetRequirePasswordChange: (_id, requirePasswordChange, requirePasswordChangeReason) ->
+		update =
+			$unset:
+				"services.password": 1
+			$set:
+				"requirePasswordChange" : requirePasswordChange,
+				"requirePasswordChangeReason": requirePasswordChangeReason
+
+		return @update _id, update
+
 	setLanguage: (_id, language) ->
 		update =
 			$set:
@@ -204,6 +352,44 @@ RocketChat.models.Users = new class extends RocketChat.models._Base
 
 		return @update query, update
 
+	saveUserById: (_id, data) ->
+		setData = {}
+		unsetData = {}
+
+		if data.name?
+			if not _.isEmpty(s.trim(data.name))
+				setData.name = s.trim(data.name)
+			else
+				unsetData.name = 1
+
+		if data.email?
+			if not _.isEmpty(s.trim(data.email))
+				setData.emails = [
+					address: s.trim(data.email)
+				]
+			else
+				unsetData.emails = 1
+
+		if data.phone?
+			if not _.isEmpty(s.trim(data.phone))
+				setData.phone = [
+					phoneNumber: s.trim(data.phone)
+				]
+			else
+				unsetData.phone = 1
+
+		update = {}
+
+		if not _.isEmpty setData
+			update.$set = setData
+
+		if not _.isEmpty unsetData
+			update.$unset = unsetData
+
+		if _.isEmpty update
+			return true
+
+		return @update { _id: _id }, update
 
 	# INSERT
 	create: (data) ->
@@ -220,11 +406,23 @@ RocketChat.models.Users = new class extends RocketChat.models._Base
 	removeById: (_id) ->
 		return @remove _id
 
-	removeByUnverifiedEmail: (email) ->
+	###
+	Find users to send a message by email if:
+	- he is not online
+	- has a verified email
+	- has not disabled email notifications
+	- `active` is equal to true (false means they were deactivated and can't login)
+	###
+	getUsersToSendOfflineEmail: (usersIds) ->
 		query =
-			emails:
-				$elemMatch:
-					address: email
-					verified: false
+			_id:
+				$in: usersIds
+			active: true
+			status: 'offline'
+			statusConnection:
+				$ne: 'online'
+			'emails.verified': true
 
-		return @remove query
+		return @find query, { fields: { name: 1, username: 1, emails: 1, 'settings.preferences.emailNotificationMode': 1 } }
+
+RocketChat.models.Users = new ModelUsers(Meteor.users, true)
